@@ -5,198 +5,146 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 import requests
-from datetime import datetime, timedelta
 
-# 1. 頁面基本設定與專業深色 CSS
-st.set_page_config(page_title="台股全能轉折預告系統", layout="wide")
+# 1. 頁面配置
+st.set_page_config(page_title="台股全能轉折預告系統 V3", layout="wide")
 
+# 台股紅綠燈 CSS 強化版
 st.markdown("""
     <style>
-    .up-price { color: #FF0000; font-size: 48px; font-weight: bold; }
-    .down-price { color: #00FF00; font-size: 48px; font-weight: bold; }
-    .recommend-card { 
-        background-color: #1E222D; 
-        padding: 15px; 
-        border-radius: 10px; 
-        border-left: 5px solid #FFD700; 
-        margin-bottom: 15px;
-    }
-    .tag-chip { 
-        background-color: #FF5252; 
-        color: white; 
-        padding: 2px 6px; 
-        border-radius: 4px; 
-        font-size: 11px; 
-        font-weight: bold;
-    }
+    .up-price { color: #FF0000; font-size: 42px; font-weight: bold; }
+    .down-price { color: #00FF00; font-size: 42px; font-weight: bold; }
+    .cdp-card { background-color: #161A25; padding: 15px; border-radius: 8px; border: 1px solid #363C4E; text-align: center; }
+    .cdp-label { color: #888; font-size: 14px; }
+    .cdp-value { color: #FFFFFF; font-size: 20px; font-weight: bold; }
+    .recommend-card { background-color: #1E222D; padding: 12px; border-radius: 8px; border-left: 5px solid #FFD700; margin-bottom: 10px; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 核心邏輯：資料抓取 (修正 MultiIndex 問題) ---
+# --- 核心邏輯：轉折值計算函數 ---
+def calculate_cdp_levels(df):
+    if df.empty: return None
+    last = df.iloc[-1]
+    H, L, C = last['High'].item(), last['Low'].item(), last['Close'].item()
+    cdp = (H + L + 2 * C) / 4
+    return {
+        "AH": cdp + (H - L),
+        "NH": 2 * cdp - L,
+        "CDP": cdp,
+        "NL": 2 * cdp - H,
+        "AL": cdp - (H - L)
+    }
+
+# --- 資料抓取與修復 ---
 @st.cache_data(ttl=600)
-def get_stock_data(symbol, period="8mo"):
+def get_data(symbol, period="8mo"):
     try:
-        df = yf.download(f"{symbol}.TW", period=period, interval="1d", progress=False)
-        if df.empty:
-            df = yf.download(f"{symbol}.TWO", period=period, interval="1d", progress=False)
-        
+        df = yf.download(symbol, period=period, interval="1d", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df
     except:
         return pd.DataFrame()
 
-# --- 核心邏輯：外資買超檢查 (FinMind API) ---
-def is_foreign_buying(symbol):
-    try:
-        # 取得最近三天的法人資料
-        url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInstitutionalInvestorsBuySell&data_id={symbol}"
-        res = requests.get(url).json()
-        df_chip = pd.DataFrame(res['data'])
-        if not df_chip.empty:
-            # 抓取最後一筆外資資料 (Foreign_Investor)
-            last_foreign = df_chip[df_chip['name'] == 'Foreign_Investor'].iloc[-1]
-            return (last_foreign['buy'] - last_foreign['sell']) > 0
-    except:
-        return True # API 異常時不阻擋，避免掃描器空白
-    return False
-
-# --- 核心邏輯：全自動選股掃描器 ---
-def run_scanner(filter_chip):
-    # 掃描池：權值股與熱門股
-    pool = ["2330", "2454", "2317", "2303", "2382", "3231", "1513", "1503", "2603", "2609", "2408", "2344", "3034", "3037", "2376", "6669", "2357"]
-    matches = []
-    
-    for s in pool:
-        d = get_stock_data(s, period="3mo")
-        if len(d) < 40: continue
-        
-        c = d['Close'].iloc[-1].item()
-        m5 = d['Close'].rolling(5).mean().iloc[-1]
-        m20 = d['Close'].rolling(20).mean().iloc[-1]
-        
-        # 條件 1: 站穩均線 + 多頭排列
-        is_bull = c > m5 > m20
-        # 條件 2: 扣三低 (現價大於 5, 10, 20 天前的價格)
-        is_low = c > d['Close'].iloc[-5] and c > d['Close'].iloc[-10] and c > d['Close'].iloc[-20]
-        
-        if is_bull and is_low:
-            if filter_chip:
-                if is_foreign_buying(s):
-                    matches.append(s)
-            else:
-                matches.append(s)
-    return matches
-
-# --- 側邊欄控制與選股視窗 ---
+# --- 側邊欄控制 ---
 st.sidebar.header("📊 系統監測面板")
-target_stock = st.sidebar.text_input("輸入台股代號", value="2330")
-st.sidebar.markdown("---")
-
-st.sidebar.subheader("🎯 老師嚴選：強勢轉折股")
+target_stock = st.sidebar.text_input("輸入個股代號 (如: 2330)", value="2330")
 use_foreign_filter = st.sidebar.checkbox("✅ 僅限外資買超推薦", value=False)
 
-with st.sidebar:
-    with st.spinner('掃描標的中...'):
-        recommended_stocks = run_scanner(use_foreign_filter)
-        if recommended_stocks:
-            for rs in recommended_stocks:
-                st.markdown(f"""
-                <div class='recommend-card'>
-                    <b>{rs}</b> <span class='tag-chip'>扣三低+多頭</span>
-                    <p style='font-size:12px; color:#888; margin-top:5px;'>符合戴維斯雙擊與站穩多頭格局</p>
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.write("目前暫無符合標的")
+# --- A. 台指未來轉折值區塊 (大盤環境) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("📉 大盤未來轉折 (台指/加權)")
+twii_df = get_data("^TWII", period="5d")
+twii_cdp = calculate_cdp_levels(twii_df)
 
-# --- 主畫面：儀表板邏輯 ---
+if twii_cdp:
+    with st.sidebar:
+        cols = st.columns(2)
+        cols[0].markdown(f"<div class='cdp-card'><span class='cdp-label'>最高壓力 AH</span><br><span class='cdp-value' style='color:#FF5252'>{twii_cdp['AH']:.0f}</span></div>", unsafe_allow_html=True)
+        cols[1].markdown(f"<div class='cdp-card'><span class='cdp-label'>近期壓力 NH</span><br><span class='cdp-value' style='color:#FFB74D'>{twii_cdp['NH']:.0f}</span></div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='cdp-card' style='margin: 5px 0;'><span class='cdp-label'>轉折重心 CDP</span><br><span class='cdp-value'>{twii_cdp['CDP']:.0f}</span></div>", unsafe_allow_html=True)
+        cols = st.columns(2)
+        cols[0].markdown(f"<div class='cdp-card'><span class='cdp-label'>近期支撐 NL</span><br><span class='cdp-value' style='color:#4DB6AC'>{twii_cdp['NL']:.0f}</span></div>", unsafe_allow_html=True)
+        cols[1].markdown(f"<div class='cdp-card'><span class='cdp-label'>最低支撐 AL</span><br><span class='cdp-value' style='color:#26A69A'>{twii_cdp['AL']:.0f}</span></div>", unsafe_allow_html=True)
+
+# --- B. 個股選股與主畫面 ---
 try:
-    df = get_stock_data(target_stock)
+    # 處理代號後綴
+    full_symbol = f"{target_stock}.TW"
+    df = get_data(full_symbol)
+    if df.empty:
+        full_symbol = f"{target_stock}.TWO"
+        df = get_data(full_symbol)
+
     if not df.empty:
-        # --- 技術指標計算 ---
-        # 1. 布林通道
+        # 計算技術指標
         df['MA20'] = df['Close'].rolling(20).mean()
         df['STD'] = df['Close'].rolling(20).std()
         df['Upper'] = df['MA20'] + (df['STD'] * 2)
         df['Lower'] = df['MA20'] - (df['STD'] * 2)
         
-        # 2. RSI (過熱指標)
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        df['RSI'] = 100 - (100 / (1 + (gain/loss)))
+        # 計算個股未來轉折
+        stock_cdp = calculate_cdp_levels(df)
         
-        # 3. ATR 與 預估天數
-        df['TR'] = np.maximum(df['High']-df['Low'], np.maximum(abs(df['High']-df['Close'].shift(1)), abs(df['Low']-df['Close'].shift(1))))
-        atr = df['TR'].rolling(14).mean().iloc[-1]
-        
-        # 數值提取
         now_price = df['Close'].iloc[-1].item()
         prev_price = df['Close'].iloc[-2].item()
         diff = now_price - prev_price
-        rsi_val = df['RSI'].iloc[-1].item()
         
-        # 預告轉折目標
-        recent_range = df['High'].tail(20).max() - df['Low'].tail(20).min()
-        target_price = now_price + (recent_range * 1.382)
-        days_est = max(1, round((target_price - now_price) / (atr * 0.8)))
-
-        # --- 顯示介面 ---
-        st.title(f"🚀 {target_stock} 專業轉折預告系統")
+        # 標題與現價
+        st.title(f"🚀 {target_stock} 轉折預告與策略系統")
         price_color = "up-price" if diff >= 0 else "down-price"
         st.markdown(f"現價：<span class='{price_color}'>{now_price:.2f}</span> "
                     f"({'▲' if diff >= 0 else '▼'}{abs(diff):.2f})", unsafe_allow_html=True)
 
+        # --- 新增：個股明日轉折值看板 ---
+        st.subheader("🎯 個股未來(明日)轉折預告值")
+        sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+        sc1.metric("最高壓力(AH)", f"{stock_cdp['AH']:.2f}")
+        sc2.metric("近期壓力(NH)", f"{stock_cdp['NH']:.2f}")
+        sc3.metric("轉折重心(CDP)", f"{stock_cdp['CDP']:.2f}")
+        sc4.metric("近期支撐(NL)", f"{stock_cdp['NL']:.2f}")
+        sc5.metric("最低支撐(AL)", f"{stock_cdp['AL']:.2f}")
+        st.caption("※ 基於今日 K 線數據計算明日操作區間")
+
         st.divider()
 
-        # 策略看板
-        c1, c2, c3 = st.columns(3)
+        # 策略資訊區
+        c1, c2 = st.columns(2)
         with c1:
-            st.info("🔮 預告噴發目標")
-            st.subheader(f"NT$ {target_price:.2f}")
-            st.write(f"預計達成時間：**{days_est} ~ {days_est+4}** 天")
-        with c2:
             st.success("🎯 建議入場區間")
-            st.subheader(f"{df['Lower'].iloc[-1]:.1f} ~ {df['MA20'].iloc[-1]:.1f}")
-            st.write("策略：回測不破月線布局")
-        with c3:
-            rsi_desc = "🔥 過熱" if rsi_val > 70 else "🧊 超跌" if rsi_val < 30 else "⚖️ 適中"
-            st.warning(f"🌡️ 過熱指標 (RSI: {rsi_val:.1f})")
-            st.subheader(rsi_desc)
+            st.subheader(f"{df['Lower'].iloc[-1]:.2f} ~ {df['MA20'].iloc[-1]:.2f}")
+        with c2:
+            st.info("🔮 趨勢扣抵狀況")
+            deduct_price = df['Close'].iloc[-20]
+            st.subheader(f"現價 {'高於' if now_price > deduct_price else '低於'} 扣抵位")
+            st.write(f"20日前扣抵價：{deduct_price:.2f}")
 
-        # 繪圖
-        fig = make_subplots(rows=3, cols=1, shared_xaxes=True, row_heights=[0.6, 0.2, 0.2], vertical_spacing=0.03)
-        # K線
+        # 繪圖 (K線 + 布林)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
         fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="K線"), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], line=dict(color='yellow', width=2), name="月線"), row=1, col=1)
-        fig.add_hline(y=target_price, line_dash="dash", line_color="red", annotation_text="目標轉折", row=1, col=1)
-        # RSI
-        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='magenta'), name="RSI"), row=2, col=1)
-        fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1)
-        fig.add_hline(y=30, line_dash="dot", line_color="green", row=2, col=1)
-        # 量
+        fig.add_trace(go.Scatter(x=df.index, y=df['Upper'], line=dict(color='rgba(255,255,255,0.2)'), name="天線"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Lower'], line=dict(color='rgba(255,255,255,0.2)'), name="地線"), row=1, col=1)
+        
+        # 成交量
         v_colors = ['red' if c >= o else 'green' for o, c in zip(df['Open'], df['Close'])]
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=v_colors, name="成交量"), row=3, col=1)
-
-        fig.update_layout(height=800, template="plotly_dark", xaxis_rangeslider_visible=False)
+        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], marker_color=v_colors, name="成交量"), row=2, col=1)
+        
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # 深度策略解讀
+        # 深度策略
         st.markdown(f"""
         <div style="background-color:#1E222D; padding:20px; border-radius:10px; border-left: 5px solid #FFD700;">
-        <h3>💡 江江風格 - 深度策略解讀</h3>
+        <h3>💡 江江風格 - 核心決策</h3>
         <ul>
-            <li><b>扣抵動能：</b>目前現價 <b>{now_price:.2f}</b> 高於 20 日前價格，均線持續助漲。</li>
-            <li><b>過熱分析：</b>RSI 目前為 <b>{rsi_val:.1f}</b>，{'漲勢過猛，不建議追高' if rsi_val > 70 else '目前安全，靜待轉折噴發'}。</li>
-            <li><b>進場提示：</b>最佳買點位於月線 <b>{df['MA20'].iloc[-1]:.2f}</b> 附近，防守位置看布林下軌。</li>
+            <li><b>轉折操作：</b>明日若開在 <b>{stock_cdp['NH']:.2f} (NH)</b> 之上，代表多頭極強，可順勢看 <b>{stock_cdp['AH']:.2f}</b>。</li>
+            <li><b>支撐關鍵：</b>若股價跌破 <b>{stock_cdp['NL']:.2f} (NL)</b>，代表進入弱勢整理，建議在 <b>{stock_cdp['AL']:.2f}</b> 附近分批低接。</li>
+            <li><b>趨勢：</b>目前月線呈{'上揚' if now_price > deduct_price else '扣抵壓力'}，{'多頭格局未變' if now_price > df['MA20'].iloc[-1] else '回測月線尋找支撐'}。</li>
         </ul>
         </div>
         """, unsafe_allow_html=True)
-
     else:
-        st.warning("請確認代號正確性")
+        st.warning("請確認代號正確性 (如: 2330)")
 except Exception as e:
-    st.error(f"系統分析異常: {e}")
-
-st.sidebar.caption("數據來源：Yahoo Finance & FinMind")
+    st.error(f"分析異常: {e}")
