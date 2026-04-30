@@ -7,6 +7,45 @@ import numpy as np
 import requests
 from datetime import datetime
 
+import time
+import requests
+
+# 解決 Streamlit Cloud 暫存權限問題
+try:
+    import appdirs as ad
+    ad.user_cache_dir = lambda *args: "/tmp"
+except:
+    pass
+
+@st.cache_data(ttl=3600)  # 將快取時間延長至 1 小時，減少請求次數
+def get_stock_data(symbol, is_index=False):
+    ticker_str = symbol if is_index else f"{symbol}.TW"
+    
+    # 建立偽裝 Session
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+    
+    for attempt in range(3):  # 最多嘗試 3 次
+        try:
+            df = yf.download(ticker_str, period="1y", interval="1d", progress=False, session=session)
+            
+            if not is_index and df.empty:
+                df = yf.download(f"{symbol}.TWO", period="1y", interval="1d", progress=False, session=session)
+            
+            if not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                return df
+                
+        except Exception as e:
+            if "429" in str(e) or "Rate limited" in str(e):
+                time.sleep(2 * (attempt + 1))  # 遇到限流，睡一下再試
+            continue
+            
+    return pd.DataFrame()
+
 # 1. 頁面配置與專業深色介面
 st.set_page_config(page_title="台股全能轉折預告系統 - 旗艦進化版", layout="wide")
 
